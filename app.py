@@ -1,4 +1,6 @@
 import re
+import os
+import time
 import requests
 from flask import Flask, jsonify, request
 from bs4 import BeautifulSoup
@@ -6,130 +8,110 @@ from flask_cors import CORS
 
 # Initialize Flask App
 app = Flask(__name__)
-# Enable CORS to allow your website to call this API
 CORS(app)
 
-# --- Data Definitions ---
-# Define the keywords we want to track for each category.
-# You can expand this list as much as you want.
+# Add a simple cache to store recent results and save API credits
+CACHE = {}
+CACHE_DURATION_SECONDS = 86400  # 24 hours
+
+# Data Definitions (No changes)
 TREND_KEYWORDS = {
-    "USA": {
-        "coloring": ["Vintage Floral Coloring Book", "Anime Character Coloring Book"],
-        "journal": ["Kids' Mindfulness Journal", "Daily Stoic Journal Prompts"],
-        "logbook": ["Workout & Fitness Logbook", "Reading Logbook"],
-        "activity": ["Brain Teasers for Seniors", "Toddler Scissor Skills Book"]
-    },
-    "FR": {
-        "coloring": ["Livre de coloriage Mandalas Zen", "Coloriage Mystère Disney"],
-        "journal": ["Mon Journal Intime Fille", "Bullet Journal à Points"],
-        "logbook": ["Carnet de Suivi Sportif", "Journal de Bord de Lecture"],
-        "activity": ["Cahier d'Activités Montessori", "Jeux de Logique et Énigmes"]
-    }
+    "USA": { "coloring": ["Vintage Floral Coloring Book", "Anime Character Coloring Book"], "journal": ["Kids' Mindfulness Journal", "Daily Stoic Journal Prompts"], "logbook": ["Workout & Fitness Logbook", "Reading Logbook"], "activity": ["Brain Teasers for Seniors", "Toddler Scissor Skills Book"] },
+    "FR": { "coloring": ["Livre de coloriage Mandalas Zen", "Coloriage Mystère Disney"], "journal": ["Mon Journal Intime Fille", "Bullet Journal à Points"], "logbook": ["Carnet de Suivi Sportif", "Journal de Bord de Lecture"], "activity": ["Cahier d'Activités Montessori", "Jeux de Logique et Énigmes"] }
 }
 
-# --- Amazon Scraping Function ---
+# Amazon Scraping Function
 def get_amazon_competition(keyword, market):
     """
-    Scrapes Amazon for a given keyword and returns the number of search results.
+    Scrapes Amazon using scrape.do and includes caching.
     """
-    market_config = {
-        "USA": {"domain": "amazon.com"},
-        "FR": {"domain": "amazon.fr"}
-    }
+    # Check cache first
+    if keyword in CACHE:
+        cached_data, timestamp = CACHE[keyword]
+        if time.time() - timestamp < CACHE_DURATION_SECONDS:
+            print(f"CACHE HIT: Using cached data for '{keyword}'")
+            return cached_data
 
-    if market not in market_config:
-        return 0
+    market_config = {"USA": {"domain": "amazon.com"}, "FR": {"domain": "amazon.fr"}}
+    if market not in market_config: return 0
 
     domain = market_config[market]["domain"]
-    url = f"https://www.{domain}/s?k={keyword.replace(' ', '+')}"
+    amazon_url_to_scrape = f"https://www.{domain}/s?k={keyword.replace(' ', '+')}"
 
-    # IMPORTANT: Set a User-Agent header to mimic a real browser
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    # --- MODIFICATION: Use scrape.do API ---
+    scrape_do_api_key = os.environ.get('SCRAPER_API_KEY') # We'll reuse the same env variable name
+    if not scrape_do_api_key:
+        print("ERROR: SCRAPER_API_KEY environment variable not set.")
+        return 0
+
+    # Construct the scrape.do API request URL
+    # Based on typical scrape.do structure, but confirm with their docs if issues arise
+    scrape_do_api_url = f"http://api.scrape.do/"
+    params = {
+        'token': scrape_do_api_key,
+        'url': amazon_url_to_scrape
     }
+    # --- END MODIFICATION ---
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+        # Send the request to scrape.do
+        response = requests.get(scrape_do_api_url, params=params, timeout=60)
+        response.raise_for_status() # Will raise an exception for HTTP errors (4xx or 5xx)
 
         soup = BeautifulSoup(response.content, 'html.parser')
-
-        # Find the element containing the result count.
-        # NOTE: Amazon's HTML can change. This selector might need updating in the future.
-        result_span = soup.find('div', {'data-component-type': 's-result-info-bar'})
         
+        result_span = soup.find('div', {'data-component-type': 's-result-info-bar'})
         if not result_span:
-            return 0 # Element not found
+            print(f"Could not find result span for keyword: {keyword} on {amazon_url_to_scrape}")
+            # print(f"Page content received from scrape.do: {response.text[:500]}") # For debugging
+            return 0
 
         result_text = result_span.get_text(strip=True)
-
-        # Use regex to find numbers in the text (e.g., "1-16 of over 3,000 results")
-        # This looks for numbers that might have commas.
         matches = re.findall(r'[\d,]+', result_text)
         
         if matches:
-            # The last number is usually the total count.
-            # Remove commas and convert to an integer.
             competition_number = int(matches[-1].replace(',', ''))
+            CACHE[keyword] = (competition_number, time.time()) # Store in cache
+            print(f"API CALL (scrape.do): Fetched and cached data for '{keyword}'")
             return competition_number
         else:
-            return 0 # No number found in the text
+            print(f"Could not parse result number from text: '{result_text}' for keyword: {keyword}")
+            return 0
 
     except requests.exceptions.RequestException as e:
-        print(f"Error fetching {url}: {e}")
+        print(f"Error fetching via scrape.do: {e}")
         return 0
     except Exception as e:
-        print(f"An error occurred during scraping: {e}")
+        print(f"An error occurred during parsing: {e}")
         return 0
 
-# --- API Endpoint ---
+# API Endpoint (No changes)
 @app.route('/api/trends', methods=['GET'])
 def get_trends():
-    # Get parameters from the request URL (e.g., /api/trends?market=USA&bookType=coloring)
     market = request.args.get('market', 'USA')
     book_type = request.args.get('bookType', 'all')
-
-    if market not in TREND_KEYWORDS:
-        return jsonify({"error": "Invalid market specified"}), 400
+    if market not in TREND_KEYWORDS: return jsonify({"error": "Invalid market specified"}), 400
 
     trends_to_fetch = []
     if book_type == 'all':
-        for btype in TREND_KEYWORDS[market]:
-            trends_to_fetch.extend(TREND_KEYWORDS[market][btype])
-    elif book_type in TREND_KEYWORDS[market]:
-        trends_to_fetch = TREND_KEYWORDS[market][book_type]
-    else:
-        return jsonify({"error": "Invalid bookType specified"}), 400
+        for btype in TREND_KEYWORDS[market]: trends_to_fetch.extend(TREND_KEYWORDS[market][btype])
+    elif book_type in TREND_KEYWORDS[market]: trends_to_fetch = TREND_KEYWORDS[market][book_type]
+    else: return jsonify({"error": "Invalid bookType specified"}), 400
 
-    # Process each keyword to build the final trend data
     final_trends = []
     for keyword in trends_to_fetch:
         competition = get_amazon_competition(keyword, market)
-        
-        # Determine competition level based on result count
-        if competition == 0:
-            comp_level = "N/A"
-        elif competition < 1000:
-            comp_level = "Low"
-        elif competition < 5000:
-            comp_level = "Medium"
-        else:
-            comp_level = "High"
-
-        # Create a dictionary that matches the frontend's expected format
-        final_trends.append({
-            "name": keyword,
-            "searchVolume": "N/A",  # You could integrate another API for this
-            "competition": comp_level,
-            "trendPercentage": competition # Using the raw number here for now
-        })
-
+        if competition == 0: comp_level = "N/A"
+        elif competition < 1000: comp_level = "Low"
+        elif competition < 5000: comp_level = "Medium"
+        else: comp_level = "High"
+        final_trends.append({"name": keyword, "searchVolume": "N/A", "competition": comp_level, "trendPercentage": competition})
     return jsonify(final_trends)
 
-# --- Health Check Endpoint ---
+# Health Check Endpoint (No changes)
 @app.route('/')
 def index():
-    return "Catch the Trend Backend is running!"
+    return "Catch the Trend Backend is running (with scrape.do)!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
