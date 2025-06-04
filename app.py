@@ -25,7 +25,6 @@ def get_amazon_competition(keyword, market):
     """
     Scrapes Amazon using scrape.do and includes caching.
     """
-    # Check cache first
     if keyword in CACHE:
         cached_data, timestamp = CACHE[keyword]
         if time.time() - timestamp < CACHE_DURATION_SECONDS:
@@ -47,36 +46,66 @@ def get_amazon_competition(keyword, market):
     params = {
         'token': scrape_do_api_key,
         'url': amazon_url_to_scrape
+        # We might add 'render': 'true' here later if needed
     }
 
     try:
-        # Send the request to scrape.do
-        # The timeout for the requests library itself is set here.
-        # Gunicorn's timeout (set in Render's start command) handles the overall worker timeout.
         response = requests.get(scrape_do_api_url, params=params, timeout=60) 
-        response.raise_for_status() # Will raise an exception for HTTP errors (4xx or 5xx)
+        response.raise_for_status()
         
-        # --- DEBUG LINE ADDED HERE ---
-        print(f"DEBUG: scrape.do response for {amazon_url_to_scrape}: {response.text[:1000]}") # Print first 1000 chars
-        # --- END DEBUG LINE ---
+        print(f"DEBUG: scrape.do response for {amazon_url_to_scrape} (first 500 chars): {response.text[:500]}")
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
-        result_span = soup.find('div', {'data-component-type': 's-result-info-bar'})
-        if not result_span:
-            print(f"Could not find result span for keyword: {keyword} on {amazon_url_to_scrape}")
-            return 0
+        # --- MODIFICATION: Updated selector based on your screenshot ---
+        # First, find the div that contains the result text.
+        # This div has classes 'a-section', 'a-spacing-small', 'a-spacing-top-small'
+        # We'll look for a div that has all these classes.
+        # Note: Amazon's class names can be very dynamic. This is an attempt.
+        # A more robust selector might be needed if this also fails.
+        
+        # Option 1: Find the specific div by its classes
+        # result_container_div = soup.find('div', class_='a-section a-spacing-small a-spacing-top-small')
 
-        result_text = result_span.get_text(strip=True)
+        # Option 2: A more general approach - find any span that contains "results for"
+        # This might be more resilient to small class name changes.
+        result_text_element = None
+        spans = soup.find_all('span')
+        for span in spans:
+            if span.get_text(strip=True).endswith("results for"): # Check if the span text ends with "results for"
+                result_text_element = span # This span contains the full "X-Y of Z results for"
+                break
+            elif "results for" in span.get_text(strip=True) and "of over" in span.get_text(strip=True): # A common pattern
+                 result_text_element = span
+                 break
+
+
+        if not result_text_element:
+            print(f"Could not find the result text element for keyword: {keyword} on {amazon_url_to_scrape}")
+            return 0
+        
+        result_text = result_text_element.get_text(strip=True)
+        # --- END MODIFICATION ---
+        
         matches = re.findall(r'[\d,]+', result_text)
         
         if matches:
-            competition_number = int(matches[-1].replace(',', ''))
-            CACHE[keyword] = (competition_number, time.time()) # Store in cache
-            print(f"API CALL (scrape.do): Fetched and cached data for '{keyword}'")
+            # Usually, the result count is one of the later numbers in a string like "1-16 of over 6,000 results"
+            # or "over 6,000 results" or "6,000 results"
+            # We'll try to be a bit smarter about picking the right number.
+            # The largest number is likely the total count.
+            potential_counts = [int(m.replace(',', '')) for m in matches]
+            if not potential_counts:
+                print(f"Could not parse numbers from result text: '{result_text}' for keyword: {keyword}")
+                return 0
+            
+            competition_number = max(potential_counts) # Take the largest number found
+
+            CACHE[keyword] = (competition_number, time.time())
+            print(f"API CALL (scrape.do): Fetched and cached data for '{keyword}'. Found text: '{result_text}', Parsed count: {competition_number}")
             return competition_number
         else:
-            print(f"Could not parse result number from text: '{result_text}' for keyword: {keyword}")
+            print(f"Could not parse numbers from result text: '{result_text}' for keyword: {keyword}")
             return 0
 
     except requests.exceptions.RequestException as e:
@@ -112,7 +141,7 @@ def get_trends():
 # Health Check Endpoint (No changes)
 @app.route('/')
 def index():
-    return "Catch the Trend Backend is running (with scrape.do)!"
+    return "Catch the Trend Backend is running (with scrape.do and updated selector)!"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
