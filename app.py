@@ -38,32 +38,33 @@ def get_amazon_competition(keyword, market):
     domain = market_config[market]["domain"]
     amazon_url_to_scrape = f"https://www.{domain}/s?k={keyword.replace(' ', '+')}"
 
-    # --- MODIFICATION: Use scrape.do API ---
-    scrape_do_api_key = os.environ.get('SCRAPER_API_KEY') # We'll reuse the same env variable name
+    scrape_do_api_key = os.environ.get('SCRAPER_API_KEY')
     if not scrape_do_api_key:
         print("ERROR: SCRAPER_API_KEY environment variable not set.")
         return 0
 
-    # Construct the scrape.do API request URL
-    # Based on typical scrape.do structure, but confirm with their docs if issues arise
     scrape_do_api_url = f"http://api.scrape.do/"
     params = {
         'token': scrape_do_api_key,
         'url': amazon_url_to_scrape
     }
-    # --- END MODIFICATION ---
 
     try:
         # Send the request to scrape.do
-        response = requests.get(scrape_do_api_url, params=params, timeout=60)
+        # The timeout for the requests library itself is set here.
+        # Gunicorn's timeout (set in Render's start command) handles the overall worker timeout.
+        response = requests.get(scrape_do_api_url, params=params, timeout=60) 
         response.raise_for_status() # Will raise an exception for HTTP errors (4xx or 5xx)
+        
+        # --- DEBUG LINE ADDED HERE ---
+        print(f"DEBUG: scrape.do response for {amazon_url_to_scrape}: {response.text[:1000]}") # Print first 1000 chars
+        # --- END DEBUG LINE ---
 
         soup = BeautifulSoup(response.content, 'html.parser')
         
         result_span = soup.find('div', {'data-component-type': 's-result-info-bar'})
         if not result_span:
             print(f"Could not find result span for keyword: {keyword} on {amazon_url_to_scrape}")
-            # print(f"Page content received from scrape.do: {response.text[:500]}") # For debugging
             return 0
 
         result_text = result_span.get_text(strip=True)
